@@ -1,6 +1,11 @@
 # api/index.py
-from flask import Flask, request
 import os
+
+# --- CORREÇÕES PARA O VERCEL (antes de importar matplotlib e yfinance) ---
+os.environ['MPLCONFIGDIR'] = '/tmp'  # Diz ao matplotlib para usar /tmp para cache
+os.environ['YF_CACHE_DIR'] = '/tmp'  # Diz ao yfinance para usar /tmp para cache
+
+from flask import Flask, request
 import io
 import requests
 import yfinance as yf
@@ -8,6 +13,9 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+# Configuração do cache do yfinance
+yf.set_tz_cache_location("/tmp")
 
 app = Flask(__name__)
 
@@ -260,32 +268,27 @@ def webhook():
 
         partes = data_btn.split(":")
 
-        # Abrir menu principal (escolher par)
         if data_btn == "menu":
             edit_message(chat_id, msg_id,
                          "💱 *Escolhe o par que queres analisar:*",
                          teclado_pares())
 
-        # Escolher timeframe para um par
         elif partes[0] == "par":
             par = partes[1]
             edit_message(chat_id, msg_id,
                          f"⏱️ *Escolhe o timeframe para {PARES[par]['nome']}:*",
                          teclado_timeframes(par))
 
-        # Timeframe escolhido → mostra menu de ações
         elif partes[0] == "tf":
             par, tf = partes[1], partes[2]
             edit_message(chat_id, msg_id,
                          f"✅ *{PARES[par]['nome']} — {TIMEFRAMES[tf]['label']}*\n\nO que queres fazer?",
                          teclado_acoes(par, tf))
 
-        # Analisar
         elif partes[0] == "analisar":
             par, tf = partes[1], partes[2]
             acao_analisar(chat_id, par, tf)
 
-        # Gráfico
         elif partes[0] == "grafico":
             par, tf = partes[1], partes[2]
             acao_grafico(chat_id, par, tf)
@@ -312,6 +315,4 @@ def webhook():
                          "Escolhe um par para começar 👇",
                          teclado_pares())
 
-    return "OK", 200git add .
-git commit -m "Adicionar selecao de par e timeframe"
-git push
+    return "OK", 200
