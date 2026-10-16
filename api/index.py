@@ -14,7 +14,7 @@ def send_telegram_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text}
     requests.post(url, json=payload)
 
-@app.route('/api', methods=['POST'])
+@app.route('/api/index', methods=['POST'])
 def webhook():
     """Este endpoint recebe as atualizações do Telegram."""
     update = request.get_json()
