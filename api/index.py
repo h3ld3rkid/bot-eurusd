@@ -1,7 +1,7 @@
 # api/index.py
 import os
 
-# --- CORREÇÕES PARA O VERCEL ---
+# --- Configurações essenciais para o Vercel ---
 os.environ['MPLCONFIGDIR'] = '/tmp'
 os.environ['YF_CACHE_DIR'] = '/tmp'
 
@@ -9,7 +9,6 @@ from flask import Flask, request
 import io
 import json
 import base64
-from datetime import datetime, timezone
 import requests
 import yfinance as yf
 import pandas as pd
@@ -27,13 +26,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Cliente Gemini
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-URL_IMAGEM_BOAS_VINDAS = ""  # Opcional: cola aqui um URL público da tua imagem de capa
-
-# ---------- Configuração de pares e timeframes ----------
-
+# ---------- Configuração de Mercados ----------
 PARES = {
     "EURUSD": {"symbol": "EURUSD=X", "nome": "EUR/USD", "dec": 4, "emoji": "🇪🇺🇺🇸"},
     "GBPUSD": {"symbol": "GBPUSD=X", "nome": "GBP/USD", "dec": 4, "emoji": "🇬🇧🇺🇸"},
@@ -52,133 +47,56 @@ TIMEFRAMES = {
     "D1":  {"interval": "1d",  "period": "1y",  "label": "D1"},
 }
 
+PERFIS = {
+    "padrao": ["EMA9", "EMA21", "RSI"],
+    "tendencia": ["EMA9", "EMA21", "MACD"],
+    "reversao": ["RSI", "BB"],
+    "todos": ["EMA9", "EMA21", "RSI", "MACD", "BB", "VRVP"]
+}
 
 # ---------- Funções Telegram ----------
-
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8)
-    except Exception:
-        pass
-
+    if reply_markup: payload["reply_markup"] = reply_markup
+    try: requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=8)
+    except Exception: pass
 
 def edit_message(chat_id, message_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        requests.post(f"{TELEGRAM_API}/editMessageText", json=payload, timeout=8)
-    except Exception:
-        pass
+    if reply_markup: payload["reply_markup"] = reply_markup
+    try: requests.post(f"{TELEGRAM_API}/editMessageText", json=payload, timeout=8)
+    except Exception: pass
 
-
-def send_photo(chat_id, photo, caption="", reply_markup=None, is_url=False):
+def send_photo(chat_id, photo_bytes, caption="", reply_markup=None):
     data = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
+    if reply_markup: data["reply_markup"] = json.dumps(reply_markup)
     try:
-        if is_url:
-            data["photo"] = photo
-            requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, timeout=8)
-        else:
-            files = {"photo": ("grafico.png", photo, "image/png")}
-            requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files, timeout=8)
-    except Exception:
-        pass
-
+        files = {"photo": ("grafico.png", photo_bytes, "image/png")}
+        requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files, timeout=10)
+    except Exception: pass
 
 def answer_callback(callback_id, text=""):
     payload = {"callback_query_id": callback_id}
-    if text:
-        payload["text"] = text
-    try:
-        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5)
-    except Exception:
-        pass
-
+    if text: payload["text"] = text
+    try: requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json=payload, timeout=5)
+    except Exception: pass
 
 def descarregar_foto_telegram(file_id):
     try:
         url = f"{TELEGRAM_API}/getFile?file_id={file_id}"
         resp = requests.get(url, timeout=8).json()
-        if not resp.get("ok"):
-            return None
+        if not resp.get("ok"): return None
         file_path = resp["result"]["file_path"]
         img_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
         img_resp = requests.get(img_url, timeout=10)
         return img_resp.content
-    except Exception:
-        return None
+    except Exception: return None
 
-
-# ---------- Integração Polymarket ----------
-
-def obter_eventos_polymarket():
-    """Vai buscar os próximos eventos desportivos ativos na Polymarket."""
-    url = "https://gamma-api.polymarket.com/events?tag_slug=sports&active=true&closed=false&limit=10"
-    
-    try:
-        resp = requests.get(url, timeout=10)
-        eventos = resp.json()
-    except Exception as e:
-        return f"❌ Erro ao ligar à Polymarket: {e}"
-
-    if not eventos:
-        return "Não encontrei eventos desportivos ativos de momento."
-
-    mensagem = "🏆 *Próximos Eventos (Polymarket)*\n\n"
-    agora = datetime.now(timezone.utc)
-    encontrou_jogo = False
-
-    for evento in eventos:
-        titulo = evento.get("title", "Evento sem nome")
-        
-        tempo_inicio = None
-        for mercado in evento.get("markets", []):
-            if "gameStartTime" in mercado and mercado["gameStartTime"]:
-                tempo_inicio = mercado["gameStartTime"]
-                break
-        
-        if not tempo_inicio:
-            continue
-        
-        try:
-            data_jogo = datetime.fromisoformat(tempo_inicio.replace("Z", "+00:00"))
-            diferenca = data_jogo - agora
-            
-            if diferenca.total_seconds() > 0:
-                dias = diferenca.days
-                horas, resto = divmod(diferenca.seconds, 3600)
-                minutos, _ = divmod(resto, 60)
-                
-                if dias > 0:
-                    tempo_str = f"{dias}d {horas}h {minutos}m"
-                else:
-                    tempo_str = f"{horas}h {minutos}m"
-                
-                mensagem += f"🏟️ {titulo}\n"
-                mensagem += f"⏳ *Começa em:* {tempo_str}\n\n"
-                encontrou_jogo = True
-                
-        except Exception:
-            continue
-
-    if not encontrou_jogo:
-        return "ℹ️ Não encontrei jogos futuros com hora de início definida."
-        
-    return mensagem
-
-
-# ---------- Análise por Screenshot (Gemini) ----------
-
+# ---------- Gemini Vision (Screenshots) ----------
 def analisar_screenshot(img_bytes, contexto=""):
     if not gemini_client:
-        return "⚠️ A análise de screenshots não está configurada. Falta a variável GEMINI_API_KEY no Vercel."
+        return "⚠️ Falta a chave GEMINI_API_KEY no Vercel."
 
-    # Redimensionar a imagem para acelerar o envio e evitar timeout
     try:
         img = Image.open(io.BytesIO(img_bytes))
         if img.width > 1024:
@@ -187,357 +105,288 @@ def analisar_screenshot(img_bytes, contexto=""):
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=85)
         img_bytes = buf.getvalue()
-    except Exception:
-        pass
+    except Exception: pass
 
-    prompt = f"""És um analista técnico profissional de trading. Analisa este gráfico com rigor.
-
-Contexto fornecido pelo utilizador: {contexto if contexto else "Nenhum."}
-
-Responde em português de Portugal, curto (máx. 200 palavras):
-
-📊 *Par e Timeframe*: Identifica o que vês.
-📈 *Tendência*: Alta, baixa ou lateral. Justifica.
-🎯 *Zonas-chave*: Suportes e resistências relevantes (valores concretos).
-🚪 *Entrada sugerida*: Preço ou zona.
-🛑 *Stop Loss*: Valor concreto e justificação.
-✅ *Take Profit*: Valor concreto e justificação.
-⚖️ *Rácio Risco/Retorno*: Calcula.
-
-Se não conseguires ver os preços no gráfico, diz isso claramente."""
+    prompt = f"""És um analista técnico profissional. Analisa este gráfico.
+Contexto: {contexto if contexto else "Nenhum."}
+Responde em português de Portugal (máx 200 palavras):
+📊 Par e Timeframe
+📈 Tendência (alta/baixa/lateral)
+🎯 Suportes e Resistências (valores)
+🚪 Entrada sugerida
+🛑 Stop Loss (valor)
+✅ Take Profit (valor)
+⚖️ Rácio Risco/Retorno
+Se não conseguires ver os preços, avisa."""
 
     try:
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[{
-                "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": "image/jpeg",
-                                     "data": base64.b64encode(img_bytes).decode()}},
-                ],
-            }],
+            contents=[{"role": "user", "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img_bytes).decode()}}
+            ]}],
         )
         return response.text
     except Exception as e:
-        return f"❌ Erro ao analisar a imagem: {str(e)}"
-
+        return f"❌ Erro no Gemini: {str(e)}"
 
 def acao_screenshot(chat_id, img_bytes, contexto=""):
     send_message(chat_id, "🔍 A analisar o teu gráfico... ⏳")
-    analise = analisar_screenshot(img_bytes, contexto)
-    send_message(chat_id, analise)
-
+    send_message(chat_id, analisar_screenshot(img_bytes, contexto))
 
 # ---------- Teclados ----------
-
 def teclado_inicial():
-    return {
-        "inline_keyboard": [
-            [{"text": "🚀   C O M E Ç A R   A N Á L I S E   🚀", "callback_data": "menu"}],
-            [{"text": "🏆 Desporto (Polymarket)", "callback_data": "polymarket"}],
-            [{"text": "━━━━━━━━━━━━━━━━━━━━", "callback_data": "noop"}],
-            [
-                {"text": "🇪🇺 EUR/USD", "callback_data": "par:EURUSD"},
-                {"text": "🥇 OURO",     "callback_data": "par:XAUUSD"},
-            ],
-            [
-                {"text": "₿ BITCOIN",  "callback_data": "par:BTCUSD"},
-                {"text": "❓ AJUDA",   "callback_data": "ajuda"},
-            ],
-        ]
-    }
+    return {"inline_keyboard": [
+        [{"text": "🚀   C O M E Ç A R   A N Á L I S E   🚀", "callback_data": "menu"}],
+        [{"text": "⚙️ Indicadores de Análise", "callback_data": "indicadores"}],
+        [{"text": "━━━━━━━━━━━━━━━━━━━━", "callback_data": "noop"}],
+        [{"text": "🇪🇺 EUR/USD", "callback_data": "par:EURUSD:padrao"}, {"text": "🥇 OURO", "callback_data": "par:XAUUSD:padrao"}],
+        [{"text": "₿ BITCOIN", "callback_data": "par:BTCUSD:padrao"}, {"text": "❓ AJUDA", "callback_data": "ajuda"}],
+    ]}
 
+def teclado_indicadores():
+    return {"inline_keyboard": [
+        [{"text": "📊 Padrão (EMA + RSI)", "callback_data": "set_ind:padrao"}],
+        [{"text": "📈 Tendência (EMA + MACD)", "callback_data": "set_ind:tendencia"}],
+        [{"text": "🔄 Reversão (RSI + Bollinger)", "callback_data": "set_ind:reversao"}],
+        [{"text": "🧠 Todos os Indicadores (c/ VRVP)", "callback_data": "set_ind:todos"}],
+        [{"text": "⬅️ Voltar", "callback_data": "inicio"}],
+    ]}
 
-def teclado_pares():
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "🇪🇺 EUR/USD", "callback_data": "par:EURUSD"},
-                {"text": "🇬🇧 GBP/USD", "callback_data": "par:GBPUSD"},
-            ],
-            [
-                {"text": "🇺🇸 USD/JPY", "callback_data": "par:USDJPY"},
-                {"text": "🇦🇺 AUD/USD", "callback_data": "par:AUDUSD"},
-            ],
-            [
-                {"text": "🥇 Ouro (XAU)", "callback_data": "par:XAUUSD"},
-                {"text": "₿ BTC/USD",     "callback_data": "par:BTCUSD"},
-            ],
-            [{"text": "⬅️ Voltar", "callback_data": "inicio"}],
-        ]
-    }
+def teclado_pares(perfil="padrao"):
+    return {"inline_keyboard": [
+        [{"text": "🇪🇺 EUR/USD", "callback_data": f"par:EURUSD:{perfil}"}, {"text": "🇬🇧 GBP/USD", "callback_data": f"par:GBPUSD:{perfil}"}],
+        [{"text": "🇺🇸 USD/JPY", "callback_data": f"par:USDJPY:{perfil}"}, {"text": "🇦🇺 AUD/USD", "callback_data": f"par:AUDUSD:{perfil}"}],
+        [{"text": "🥇 Ouro (XAU)", "callback_data": f"par:XAUUSD:{perfil}"}, {"text": "₿ BTC/USD", "callback_data": f"par:BTCUSD:{perfil}"}],
+        [{"text": "⬅️ Voltar", "callback_data": "inicio"}],
+    ]}
 
-
-def teclado_timeframes(par):
+def teclado_timeframes(par, perfil):
     tfs = list(TIMEFRAMES.keys())
     teclas = []
     for i in range(0, len(tfs), 3):
-        linha = [{"text": f"⏱️ {TIMEFRAMES[t]['label']}", "callback_data": f"tf:{par}:{t}"} for t in tfs[i:i+3]]
+        linha = [{"text": f"⏱️ {TIMEFRAMES[t]['label']}", "callback_data": f"tf:{par}:{t}:{perfil}"} for t in tfs[i:i+3]]
         teclas.append(linha)
-    teclas.append([{"text": "⬅️ Trocar par", "callback_data": "menu"}])
+    teclas.append([{"text": "⬅️ Trocar par", "callback_data": f"menu_ind:{perfil}"}])
     return {"inline_keyboard": teclas}
 
+def teclado_acoes(par, tf, perfil):
+    return {"inline_keyboard": [
+        [{"text": "📊   A N A L I S A R   📊", "callback_data": f"analisar:{par}:{tf}:{perfil}"}],
+        [{"text": "📈   G R Á F I C O   📈", "callback_data": f"grafico:{par}:{tf}:{perfil}"}],
+        [{"text": "🔁 Trocar par", "callback_data": f"menu_ind:{perfil}"}, {"text": "⏱️ Trocar TF", "callback_data": f"par:{par}:{perfil}"}],
+    ]}
 
-def teclado_acoes(par, tf):
-    return {
-        "inline_keyboard": [
-            [{"text": "📊   A N A L I S A R   📊", "callback_data": f"analisar:{par}:{tf}"}],
-            [{"text": "📈   G R Á F I C O   📈", "callback_data": f"grafico:{par}:{tf}"}],
-            [
-                {"text": "🔁 Trocar par", "callback_data": "menu"},
-                {"text": "⏱️ Trocar TF", "callback_data": f"par:{par}"},
-            ],
-        ]
-    }
+# ---------- Motor de Análise ----------
+def calcular_vrvp(data, num_bins=20):
+    visivel = data.tail(100).copy()
+    if len(visivel) < 20: return None
+    preco_min, preco_max = visivel['Low'].min(), visivel['High'].max()
+    if pd.isna(preco_min) or preco_min == preco_max: return None
+    
+    weights = visivel['Volume'] if visivel['Volume'].sum() > 0 else pd.Series(1, index=visivel.index)
+    bins = pd.cut(visivel['Close'], bins=num_bins, labels=False)
+    vol_por_bin = weights.groupby(bins).sum()
+    if vol_por_bin.empty: return None
 
+    poc_bin = vol_por_bin.idxmax()
+    edges = pd.cut(visivel['Close'], bins=num_bins, retbins=True)[1]
+    poc_price = (edges[poc_bin] + edges[poc_bin+1]) / 2
 
-# ---------- Análise EMA/RSI ----------
+    total_vol, target_vol, vol_acum = vol_por_bin.sum(), vol_por_bin.sum() * 0.70, 0
+    vah, val = poc_price, poc_price
+    
+    for b in vol_por_bin.sort_values(ascending=False).index:
+        vol_acum += vol_por_bin[b]
+        preco_bin = (edges[b] + edges[b+1]) / 2
+        vah, val = max(vah, preco_bin), min(val, preco_bin)
+        if vol_acum >= target_vol: break
+
+    return {"poc": poc_price, "vah": vah, "val": val}
 
 def obter_dados(par, tf):
-    symbol = PARES[par]["symbol"]
-    cfg = TIMEFRAMES[tf]
+    symbol, cfg = PARES[par]["symbol"], TIMEFRAMES[tf]
     data = yf.download(symbol, period=cfg["period"], interval=cfg["interval"], progress=False)
-    if data.empty:
-        return None
+    if data.empty: return None
+    
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
     data = data.dropna(subset=['Close'])
+
     if "resample" in cfg:
-        data = data.resample(cfg["resample"]).agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min',
-            'Close': 'last', 'Volume': 'sum'
-        }).dropna()
-    if data.empty:
-        return None
+        data = data.resample(cfg["resample"]).agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
+    if data.empty: return None
+
+    # Indicadores
     data['EMA9'] = data['Close'].ewm(span=9, adjust=False).mean()
     data['EMA21'] = data['Close'].ewm(span=21, adjust=False).mean()
+    
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    data['RSI'] = 100 - (100 / (1 + rs))
+    data['RSI'] = 100 - (100 / (1 + (gain / loss)))
+    
+    data['MACD'] = data['Close'].ewm(span=12, adjust=False).mean() - data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    
+    data['BB_Mid'] = data['Close'].rolling(window=20).mean()
+    data['BB_Std'] = data['Close'].rolling(window=20).std()
+    data['BB_Upper'] = data['BB_Mid'] + (data['BB_Std'] * 2)
+    data['BB_Lower'] = data['BB_Mid'] - (data['BB_Std'] * 2)
+    
+    data.attrs['vrvp'] = calcular_vrvp(data)
     return data
 
+def calcular_sinal(data, perfil):
+    ultimo, preco, vrvp = data.iloc[-1], float(data.iloc[-1]['Close']), data.attrs.get('vrvp')
+    vc, vv, ativos = 0, 0, PERFIS[perfil]
+    
+    if "EMA9" in ativos and ultimo['EMA9'] > ultimo['EMA21']: vc += 1
+    elif "EMA9" in ativos: vv += 1
+    
+    if "RSI" in ativos and ultimo['RSI'] > 50: vc += 1
+    elif "RSI" in ativos: vv += 1
+    
+    if "MACD" in ativos and ultimo['MACD'] > ultimo['MACD_Signal']: vc += 1
+    elif "MACD" in ativos: vv += 1
+        
+    if "BB" in ativos and preco > ultimo['BB_Mid']: vc += 1
+    elif "BB" in ativos: vv += 1
 
-def calcular_sinal(data):
-    preco = float(data['Close'].iloc[-1])
-    ema9 = float(data['EMA9'].iloc[-1])
-    ema21 = float(data['EMA21'].iloc[-1])
-    rsi = float(data['RSI'].iloc[-1])
-    sinal = "NEUTRO"
-    if ema9 > ema21 and rsi > 50:
-        sinal = "COMPRA"
-    elif ema9 < ema21 and rsi < 50:
-        sinal = "VENDA"
-    return sinal, preco, ema9, ema21, rsi
+    if "VRVP" in ativos and vrvp:
+        if preco > vrvp["vah"]: vc += 1
+        elif preco < vrvp["val"]: vv += 1
 
+    sinal = "COMPRA" if vc > vv else "VENDA" if vv > vc else "NEUTRO"
+    return sinal, vc, vv, ultimo, vrvp
 
-def texto_analise(par, tf, sinal, preco, ema9, ema21, rsi):
-    if sinal == "COMPRA":
-        emoji = "🟢⬆️  *S I N A L   D E   C O M P R A*"
-    elif sinal == "VENDA":
-        emoji = "🔴⬇️  *S I N A L   D E   V E N D A*"
-    else:
-        emoji = "⚪  *N E U T R O*  (sem sinal claro)"
-    d = PARES[par]["dec"]
-    return (
-        f"┌─────────────────────────┐\n"
-        f"   {PARES[par]['emoji']} *{PARES[par]['nome']}* — *{TIMEFRAMES[tf]['label']}*\n"
-        f"└─────────────────────────┘\n\n"
-        f"{emoji}\n\n"
-        f"💵 Preço:  `{preco:.{d}f}`\n"
-        f"📈 EMA 9:  `{ema9:.{d}f}`\n"
-        f"📉 EMA 21: `{ema21:.{d}f}`\n"
-        f"⚡ RSI(14): `{rsi:.2f}`\n\n"
-        f"⚠️ _Análise automática. Não é aconselhamento financeiro._"
-    )
-
+def texto_analise(par, tf, perfil, sinal, vc, vv, ultimo, vrvp):
+    emoji = "🟢⬆️ COMPRA" if sinal == "COMPRA" else "🔴⬇️ VENDA" if sinal == "VENDA" else "⚪ NEUTRO"
+    d, ativos = PARES[par]["dec"], PERFIS[perfil]
+    
+    txt = f"┌─────────────────────────┐\n   {PARES[par]['emoji']} *{PARES[par]['nome']}* — *{TIMEFRAMES[tf]['label']}*\n└─────────────────────────┘\n\n"
+    txt += f"Sinal: *{emoji}*\nVotação: {vc} Compra / {vv} Venda\n\n"
+    txt += f"💵 Preço: `{ultimo['Close']:.{d}f}`\n"
+    
+    if "EMA9" in ativos: txt += f"📈 EMA 9: `{ultimo['EMA9']:.{d}f}` | EMA 21: `{ultimo['EMA21']:.{d}f}`\n"
+    if "RSI" in ativos: txt += f"⚡ RSI(14): `{ultimo['RSI']:.2f}`\n"
+    if "MACD" in ativos: txt += f"📊 MACD: `{ultimo['MACD']:.{d}f}` | Sinal: `{ultimo['MACD_Signal']:.{d}f}`\n"
+    if "BB" in ativos: txt += f"🎈 BB Sup: `{ultimo['BB_Upper']:.{d}f}` | Inf: `{ultimo['BB_Lower']:.{d}f}`\n"
+    if "VRVP" in ativos and vrvp:
+        txt += f"📊 VRVP: `POC: {vrvp['poc']:.{d}f}` | `VAH: {vrvp['vah']:.{d}f}` | `VAL: {vrvp['val']:.{d}f}`\n"
+        
+    txt += f"\n⚠️ _Perfil: {perfil.capitalize()}. Não é aconselhamento financeiro._"
+    return txt
 
 def gerar_grafico(data, sinal, par, tf):
     ultimos = data.tail(60).copy()
     fig, ax = plt.subplots(figsize=(8, 4.5), dpi=110)
-    fig.patch.set_facecolor('#0e1621')
-    ax.set_facecolor('#0e1621')
+    fig.patch.set_facecolor('#0e1621'); ax.set_facecolor('#0e1621')
 
     x = range(len(ultimos))
     ax.plot(x, ultimos['Close'].values, color='#4da3ff', linewidth=1.8, label='Preço')
-    ax.plot(x, ultimos['EMA9'].values, color='#00e676', linewidth=1.2, label='EMA 9')
-    ax.plot(x, ultimos['EMA21'].values, color='#ff5252', linewidth=1.2, label='EMA 21')
+    ax.plot(x, ultimos['EMA9'].values, color='#00e676', linewidth=1.0, label='EMA 9')
+    ax.plot(x, ultimos['EMA21'].values, color='#ff5252', linewidth=1.0, label='EMA 21')
+    ax.fill_between(x, ultimos['BB_Upper'].values, ultimos['BB_Lower'].values, color='#4da3ff', alpha=0.1, label='Bollinger')
 
-    ultimo_x = len(ultimos) - 1
-    ultimo_y = float(ultimos['Close'].iloc[-1])
+    vrvp = data.attrs.get('vrvp')
+    if vrvp:
+        ax.axhline(y=vrvp['poc'], color='#ffcc00', linestyle='--', linewidth=1.2, label='POC')
+        ax.axhline(y=vrvp['vah'], color='#00e676', linestyle=':', linewidth=1.0, label='VAH')
+        ax.axhline(y=vrvp['val'], color='#ff5252', linestyle=':', linewidth=1.0, label='VAL')
 
-    if sinal == "COMPRA":
-        ax.annotate('', xy=(ultimo_x, ultimo_y * 1.0008),
-                    xytext=(ultimo_x, ultimo_y * 0.9992),
-                    arrowprops=dict(facecolor='#00e676', edgecolor='#00e676',
-                                    width=6, headwidth=18, headlength=14))
-        ax.text(0.02, 0.95, 'COMPRA', color='#00e676', fontsize=16,
-                fontweight='bold', transform=ax.transAxes, va='top')
-    elif sinal == "VENDA":
-        ax.annotate('', xy=(ultimo_x, ultimo_y * 0.9992),
-                    xytext=(ultimo_x, ultimo_y * 1.0008),
-                    arrowprops=dict(facecolor='#ff5252', edgecolor='#ff5252',
-                                    width=6, headwidth=18, headlength=14))
-        ax.text(0.02, 0.95, 'VENDA', color='#ff5252', fontsize=16,
-                fontweight='bold', transform=ax.transAxes, va='top')
-    else:
-        ax.text(0.02, 0.95, 'NEUTRO', color='#cccccc', fontsize=16,
-                fontweight='bold', transform=ax.transAxes, va='top')
+    ultimo_x, ultimo_y = len(ultimos) - 1, float(ultimos['Close'].iloc[-1])
+    cor = '#00e676' if sinal == "COMPRA" else '#ff5252' if sinal == "VENDA" else '#cccccc'
+    
+    ax.scatter([ultimo_x], [ultimo_y], color=cor, s=150, zorder=5)
+    ax.text(0.02, 0.95, sinal, color=cor, fontsize=16, fontweight='bold', transform=ax.transAxes, va='top')
 
-    ax.set_title(f"{PARES[par]['nome']} — {TIMEFRAMES[tf]['label']}",
-                 color='white', fontsize=13, pad=10)
+    ax.set_title(f"{PARES[par]['nome']} — {TIMEFRAMES[tf]['label']}", color='white', fontsize=13, pad=10)
     ax.tick_params(colors='#aaaaaa', labelsize=8)
-    for spine in ax.spines.values():
-        spine.set_color('#2a3a4a')
+    for spine in ax.spines.values(): spine.set_color('#2a3a4a')
     ax.grid(True, alpha=0.15, color='#8899aa')
+    
     legend = ax.legend(loc='lower right', fontsize=8, facecolor='#1a2433', edgecolor='#2a3a4a')
-    for t in legend.get_texts():
-        t.set_color('white')
+    for t in legend.get_texts(): t.set_color('white')
 
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
+    plt.close(fig); buf.seek(0)
     return buf.getvalue()
 
-
+# ---------- Ações ----------
 def acao_inicio(chat_id, nome=""):
-    saudacao = f"Olá, {nome}!" if nome else "Olá!"
-    caption = (
-        f"👋 *{saudacao}*\n\n"
-        f"Bem-vindo ao *AI Trading Bot* 🤖\n\n"
-        f"🔹 Análise automática (EMA/RSI)\n"
-        f"🔹 Análise de screenshots (IA Gemini)\n"
-        f"🔹 Eventos desportivos (Polymarket)\n\n"
-        f"Usa os botões abaixo 👇"
-    )
-    if URL_IMAGEM_BOAS_VINDAS.startswith("http"):
-        send_photo(chat_id, URL_IMAGEM_BOAS_VINDAS, caption=caption,
-                   reply_markup=teclado_inicial(), is_url=True)
-    else:
-        send_message(chat_id, caption, teclado_inicial())
+    send_message(chat_id, f"👋 *Olá, {nome}!*\n\nBem-vindo ao AI Trading Bot 🤖\nEscolhe uma opção:", teclado_inicial())
 
-
-def acao_analisar(chat_id, par, tf):
+def acao_analisar(chat_id, par, tf, perfil):
     data = obter_dados(par, tf)
-    if data is None:
+    if not data:
         send_message(chat_id, "❌ Não consegui obter dados. Tenta outro par ou timeframe.")
         return
-    sinal, preco, ema9, ema21, rsi = calcular_sinal(data)
-    send_message(chat_id, texto_analise(par, tf, sinal, preco, ema9, ema21, rsi),
-                 teclado_acoes(par, tf))
+    sinal, vc, vv, ultimo, vrvp = calcular_sinal(data, perfil)
+    send_message(chat_id, texto_analise(par, tf, perfil, sinal, vc, vv, ultimo, vrvp), teclado_acoes(par, tf, perfil))
 
-
-def acao_grafico(chat_id, par, tf):
+def acao_grafico(chat_id, par, tf, perfil):
     data = obter_dados(par, tf)
-    if data is None:
+    if not data:
         send_message(chat_id, "❌ Não consegui obter dados.")
         return
-    sinal, preco, ema9, ema21, rsi = calcular_sinal(data)
+    sinal, _, _, ultimo, _ = calcular_sinal(data, perfil)
     img = gerar_grafico(data, sinal, par, tf)
     d = PARES[par]["dec"]
     emoji = {"COMPRA": "🟢⬆️", "VENDA": "🔴⬇️", "NEUTRO": "⚪"}[sinal]
-    caption = f"{emoji} *{sinal}* | Preço: `{preco:.{d}f}` | RSI: `{rsi:.1f}`"
-    send_photo(chat_id, img, caption=caption, reply_markup=teclado_acoes(par, tf))
-
+    send_photo(chat_id, img, caption=f"{emoji} *{sinal}* | Preço: `{ultimo['Close']:.{d}f}`", reply_markup=teclado_acoes(par, tf, perfil))
 
 # ---------- Webhook ----------
-
 @app.route('/api/index', methods=['POST'])
 def webhook():
     update = request.get_json()
 
-    # --- Cliques nos botões ---
     if "callback_query" in update:
         cq = update["callback_query"]
-        chat_id = cq["message"]["chat"]["id"]
-        msg_id = cq["message"]["message_id"]
-        data_btn = cq["data"]
+        chat_id, msg_id, data_btn = cq["message"]["chat"]["id"], cq["message"]["message_id"], cq["data"]
         answer_callback(cq["id"])
-
-        if data_btn == "noop":
-            return "OK", 200
-
         partes = data_btn.split(":")
 
+        if data_btn == "noop": return "OK", 200
         if data_btn == "inicio":
-            edit_message(chat_id, msg_id,
-                         "🏠 *Menu principal*\n\nO que queres fazer?",
-                         teclado_inicial())
-
-        elif data_btn == "menu":
-            edit_message(chat_id, msg_id,
-                         "💱 *Escolhe o par que queres analisar:*",
-                         teclado_pares())
-
-        elif data_btn == "polymarket":
-            send_message(chat_id, "🔍 A procurar eventos na Polymarket... ⏳")
-            resultado = obter_eventos_polymarket()
-            send_message(chat_id, resultado)
-
-        elif data_btn == "ajuda":
-            edit_message(chat_id, msg_id,
-                         "🤖 *Como usar o bot:*\n\n"
-                         "*📊 Análise automática:*\n"
-                         "Escolhe par → timeframe → Analisar/Gráfico.\n\n"
-                         "*🖼️ Análise por screenshot:*\n"
-                         "Envia uma *foto do teu gráfico* (MT5, TradingView, etc.) para a IA analisar.\n\n"
-                         "*🏆 Polymarket:*\n"
-                         "Vê os próximos eventos desportivos e quanto tempo falta para começarem.\n\n"
-                         "⚠️ _Ferramenta educacional. Não é aconselhamento financeiro._",
-                         {"inline_keyboard": [[{"text": "⬅️ Voltar", "callback_data": "inicio"}]]})
-
+            edit_message(chat_id, msg_id, "🏠 *Menu principal*\n\nO que queres fazer?", teclado_inicial())
+        elif data_btn == "indicadores":
+            edit_message(chat_id, msg_id, "⚙️ *Escolhe o perfil de indicadores:*\n\nO bot vai calcular o sinal com base nos indicadores do perfil.", teclado_indicadores())
+        elif partes[0] == "set_ind":
+            perfil = partes[1]
+            edit_message(chat_id, msg_id, f"✅ Perfil *{perfil.capitalize()}* selecionado!\n\nAgora escolhe o par:", teclado_pares(perfil))
+        elif partes[0] == "menu_ind":
+            edit_message(chat_id, msg_id, "💱 *Escolhe o par:*", teclado_pares(partes[1]))
         elif partes[0] == "par":
-            par = partes[1]
-            edit_message(chat_id, msg_id,
-                         f"⏱️ *Escolhe o timeframe para {PARES[par]['emoji']} {PARES[par]['nome']}:*",
-                         teclado_timeframes(par))
-
+            par, perfil = partes[1], partes[2]
+            edit_message(chat_id, msg_id, f"⏱️ *Escolhe o timeframe para {PARES[par]['nome']}:*", teclado_timeframes(par, perfil))
         elif partes[0] == "tf":
-            par, tf = partes[1], partes[2]
-            edit_message(chat_id, msg_id,
-                         f"✅ *{PARES[par]['emoji']} {PARES[par]['nome']} — {TIMEFRAMES[tf]['label']}*\n\nO que queres fazer?",
-                         teclado_acoes(par, tf))
-
+            par, tf, perfil = partes[1], partes[2], partes[3]
+            edit_message(chat_id, msg_id, f"✅ *{PARES[par]['nome']} — {TIMEFRAMES[tf]['label']}*\nPerfil: {perfil.capitalize()}\n\nO que queres fazer?", teclado_acoes(par, tf, perfil))
         elif partes[0] == "analisar":
-            par, tf = partes[1], partes[2]
-            acao_analisar(chat_id, par, tf)
-
+            acao_analisar(chat_id, partes[1], partes[2], partes[3])
         elif partes[0] == "grafico":
-            par, tf = partes[1], partes[2]
-            acao_grafico(chat_id, par, tf)
+            acao_grafico(chat_id, partes[1], partes[2], partes[3])
+        elif data_btn == "ajuda":
+            edit_message(chat_id, msg_id, "🤖 *Como usar:*\n\n1. Escolhe um perfil de indicadores (opcional).\n2. Escolhe o par e o timeframe.\n3. Clica em Analisar ou Gráfico.\n\n📸 *Screenshot:* Envia uma foto de um gráfico para a IA analisar.", {"inline_keyboard": [[{"text": "⬅️ Voltar", "callback_data": "inicio"}]]})
 
-    # --- Foto enviada pelo utilizador (screenshot para análise) ---
     elif "message" in update and "photo" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         foto = update["message"]["photo"][-1]
         contexto = update["message"].get("caption", "")
-
         img_bytes = descarregar_foto_telegram(foto["file_id"])
-        if img_bytes:
-            acao_screenshot(chat_id, img_bytes, contexto)
-        else:
-            send_message(chat_id, "❌ Não consegui descarregar a imagem. Tenta novamente.")
+        if img_bytes: acao_screenshot(chat_id, img_bytes, contexto)
+        else: send_message(chat_id, "❌ Não consegui descarregar a imagem.")
 
-    # --- Mensagens de texto ---
     elif "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         nome = update["message"]["chat"].get("first_name", "")
         texto = update["message"]["text"].strip().lower()
-
-        if texto in ("/start", "ola", "olá", "oi", "/menu"):
-            acao_inicio(chat_id, nome)
-        elif texto in ("/ajuda", "ajuda", "help"):
-            send_message(chat_id,
-                         "🤖 Envia /start para começar, ou envia um *screenshot* do teu gráfico.",
-                         teclado_inicial())
-        else:
-            send_message(chat_id,
-                         "👋 Usa os botões abaixo ou envia um *screenshot* do teu gráfico 👇",
-                         teclado_inicial())
+        if texto in ("/start", "ola", "olá", "oi", "/menu"): acao_inicio(chat_id, nome)
+        else: send_message(chat_id, "👋 Usa os botões para começar ou envia um *screenshot*.", teclado_inicial())
 
     return "OK", 200
