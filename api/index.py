@@ -92,7 +92,7 @@ def descarregar_foto_telegram(file_id):
         return img_resp.content
     except Exception: return None
 
-# ---------- Gemini Vision (Screenshots) ----------
+# ---------- Gemini Vision (Screenshots para Opções Binárias) ----------
 def analisar_screenshot(img_bytes, contexto=""):
     if not gemini_client:
         return "⚠️ Falta a chave GEMINI_API_KEY no Vercel."
@@ -107,17 +107,20 @@ def analisar_screenshot(img_bytes, contexto=""):
         img_bytes = buf.getvalue()
     except Exception: pass
 
-    prompt = f"""És um analista técnico profissional. Analisa este gráfico.
-Contexto: {contexto if contexto else "Nenhum."}
-Responde em português de Portugal (máx 200 palavras):
-📊 Par e Timeframe
-📈 Tendência (alta/baixa/lateral)
-🎯 Suportes e Resistências (valores)
-🚪 Entrada sugerida
-🛑 Stop Loss (valor)
-✅ Take Profit (valor)
-⚖️ Rácio Risco/Retorno
-Se não conseguires ver os preços, avisa."""
+    prompt = f"""És um trader profissional especialista em opções binárias (Pocket Option). Analisa este gráfico.
+Contexto fornecido pelo utilizador: {contexto if contexto else "Nenhum."}
+
+Responde em português de Portugal, de forma direta e curta (máx. 150 palavras):
+
+📊 Ativo e Timeframe: Identifica o que vês.
+📈 Tendência: Alta, baixa ou lateral.
+🕯️ Análise de Velas: O que as últimas 3 velas mostram? (ex: força, rejeição, exaustão).
+🚦 SINAL PARA O PRÓXIMO CANDLE: CALL (COMPRA), PUT (VENDA) ou ESPERAR.
+🔮 Nível de Confiança: (0% a 100%).
+🛑 Suportes e Resistências: Valores visíveis no gráfico.
+💡 Justificação: O porquê do sinal ou do ESPERAR.
+
+Se não tiveres a certeza, recomenda ESPERAR. Os gráficos OTC são imprevisíveis."""
 
     try:
         response = gemini_client.models.generate_content(
@@ -178,7 +181,7 @@ def teclado_acoes(par, tf, perfil):
         [{"text": "🔁 Trocar par", "callback_data": f"menu_ind:{perfil}"}, {"text": "⏱️ Trocar TF", "callback_data": f"par:{par}:{perfil}"}],
     ]}
 
-# ---------- Motor de Análise ----------
+# ---------- Motor de Análise (Forex) ----------
 def calcular_vrvp(data, num_bins=20):
     visivel = data.tail(100).copy()
     if len(visivel) < 20: return None
@@ -219,7 +222,7 @@ def obter_dados(par, tf):
         data = data.resample(cfg["resample"]).agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
     if data.empty: return None
 
-    # Indicadores
+    # Cálculo de Indicadores
     data['EMA9'] = data['Close'].ewm(span=9, adjust=False).mean()
     data['EMA21'] = data['Close'].ewm(span=21, adjust=False).mean()
     
@@ -372,7 +375,7 @@ def webhook():
         elif partes[0] == "grafico":
             acao_grafico(chat_id, partes[1], partes[2], partes[3])
         elif data_btn == "ajuda":
-            edit_message(chat_id, msg_id, "🤖 *Como usar:*\n\n1. Escolhe um perfil de indicadores (opcional).\n2. Escolhe o par e o timeframe.\n3. Clica em Analisar ou Gráfico.\n\n📸 *Screenshot:* Envia uma foto de um gráfico para a IA analisar.", {"inline_keyboard": [[{"text": "⬅️ Voltar", "callback_data": "inicio"}]]})
+            edit_message(chat_id, msg_id, "🤖 *Como usar:*\n\n1. Escolhe um perfil de indicadores (opcional).\n2. Escolhe o par e o timeframe.\n3. Clica em Analisar ou Gráfico.\n\n📸 *Screenshot:* Envia uma foto de um gráfico (Pocket Option, MT5, etc.) para a IA analisar.", {"inline_keyboard": [[{"text": "⬅️ Voltar", "callback_data": "inicio"}]]})
 
     elif "message" in update and "photo" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
