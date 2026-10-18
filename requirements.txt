@@ -4,3 +4,4 @@ yfinance
 pandas
 matplotlib
 google-genai>=1.16.1
+Pillow

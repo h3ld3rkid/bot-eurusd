@@ -9,6 +9,7 @@ from flask import Flask, request
 import io
 import json
 import base64
+from datetime import datetime, timezone
 import requests
 import yfinance as yf
 import pandas as pd
@@ -16,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from google import genai
+from PIL import Image
 
 yf.set_tz_cache_location("/tmp")
 
@@ -25,10 +27,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Cliente Gemini (só é inicializado se a chave existir)
+# Cliente Gemini
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-URL_IMAGEM_BOAS_VINDAS = ""  # opcional: cola aqui um URL público
+URL_IMAGEM_BOAS_VINDAS = ""  # Opcional: cola aqui um URL público da tua imagem de capa
 
 # ---------- Configuração de pares e timeframes ----------
 
@@ -99,7 +101,6 @@ def answer_callback(callback_id, text=""):
 
 
 def descarregar_foto_telegram(file_id):
-    """Descarrega a foto do Telegram e devolve bytes."""
     try:
         url = f"{TELEGRAM_API}/getFile?file_id={file_id}"
         resp = requests.get(url, timeout=8).json()
@@ -113,47 +114,109 @@ def descarregar_foto_telegram(file_id):
         return None
 
 
+# ---------- Integração Polymarket ----------
+
+def obter_eventos_polymarket():
+    """Vai buscar os próximos eventos desportivos ativos na Polymarket."""
+    url = "https://gamma-api.polymarket.com/events?tag_slug=sports&active=true&closed=false&limit=10"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        eventos = resp.json()
+    except Exception as e:
+        return f"❌ Erro ao ligar à Polymarket: {e}"
+
+    if not eventos:
+        return "Não encontrei eventos desportivos ativos de momento."
+
+    mensagem = "🏆 *Próximos Eventos (Polymarket)*\n\n"
+    agora = datetime.now(timezone.utc)
+    encontrou_jogo = False
+
+    for evento in eventos:
+        titulo = evento.get("title", "Evento sem nome")
+        
+        tempo_inicio = None
+        for mercado in evento.get("markets", []):
+            if "gameStartTime" in mercado and mercado["gameStartTime"]:
+                tempo_inicio = mercado["gameStartTime"]
+                break
+        
+        if not tempo_inicio:
+            continue
+        
+        try:
+            data_jogo = datetime.fromisoformat(tempo_inicio.replace("Z", "+00:00"))
+            diferenca = data_jogo - agora
+            
+            if diferenca.total_seconds() > 0:
+                dias = diferenca.days
+                horas, resto = divmod(diferenca.seconds, 3600)
+                minutos, _ = divmod(resto, 60)
+                
+                if dias > 0:
+                    tempo_str = f"{dias}d {horas}h {minutos}m"
+                else:
+                    tempo_str = f"{horas}h {minutos}m"
+                
+                mensagem += f"🏟️ {titulo}\n"
+                mensagem += f"⏳ *Começa em:* {tempo_str}\n\n"
+                encontrou_jogo = True
+                
+        except Exception:
+            continue
+
+    if not encontrou_jogo:
+        return "ℹ️ Não encontrei jogos futuros com hora de início definida."
+        
+    return mensagem
+
+
 # ---------- Análise por Screenshot (Gemini) ----------
 
 def analisar_screenshot(img_bytes, contexto=""):
-    """Envia a imagem ao Gemini e devolve análise técnica estruturada."""
     if not gemini_client:
         return "⚠️ A análise de screenshots não está configurada. Falta a variável GEMINI_API_KEY no Vercel."
+
+    # Redimensionar a imagem para acelerar o envio e evitar timeout
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+        if img.width > 1024:
+            ratio = 1024 / img.width
+            img = img.resize((1024, int(img.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        img_bytes = buf.getvalue()
+    except Exception:
+        pass
 
     prompt = f"""És um analista técnico profissional de trading. Analisa este gráfico com rigor.
 
 Contexto fornecido pelo utilizador: {contexto if contexto else "Nenhum."}
 
-Responde em português de Portugal, de forma estruturada e curta (máx. 300 palavras):
+Responde em português de Portugal, curto (máx. 200 palavras):
 
 📊 *Par e Timeframe*: Identifica o que vês.
-📈 *Tendência*: Alta, baixa ou lateral. Justifica com o que observas.
+📈 *Tendência*: Alta, baixa ou lateral. Justifica.
 🎯 *Zonas-chave*: Suportes e resistências relevantes (valores concretos).
 🚪 *Entrada sugerida*: Preço ou zona.
 🛑 *Stop Loss*: Valor concreto e justificação.
 ✅ *Take Profit*: Valor concreto e justificação.
-⚖️ *Rácio Risco/Retorno*: Calcula (ex: 1:2).
-⚠️ *Aviso*: Se não tiveres informação suficiente (sem preços visíveis, gráfico cortado, etc.), diz claramente.
+⚖️ *Rácio Risco/Retorno*: Calcula.
 
-Sê honesto. Não inventes valores que não consegues ver no gráfico."""
+Se não conseguires ver os preços no gráfico, diz isso claramente."""
 
     try:
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": base64.b64encode(img_bytes).decode(),
-                            }
-                        },
-                    ],
-                }
-            ],
+            contents=[{
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg",
+                                     "data": base64.b64encode(img_bytes).decode()}},
+                ],
+            }],
         )
         return response.text
     except Exception as e:
@@ -172,6 +235,7 @@ def teclado_inicial():
     return {
         "inline_keyboard": [
             [{"text": "🚀   C O M E Ç A R   A N Á L I S E   🚀", "callback_data": "menu"}],
+            [{"text": "🏆 Desporto (Polymarket)", "callback_data": "polymarket"}],
             [{"text": "━━━━━━━━━━━━━━━━━━━━", "callback_data": "noop"}],
             [
                 {"text": "🇪🇺 EUR/USD", "callback_data": "par:EURUSD"},
@@ -228,7 +292,7 @@ def teclado_acoes(par, tf):
     }
 
 
-# ---------- Análise EMA/RSI (já existente) ----------
+# ---------- Análise EMA/RSI ----------
 
 def obter_dados(par, tf):
     symbol = PARES[par]["symbol"]
@@ -347,7 +411,8 @@ def acao_inicio(chat_id, nome=""):
         f"👋 *{saudacao}*\n\n"
         f"Bem-vindo ao *AI Trading Bot* 🤖\n\n"
         f"🔹 Análise automática (EMA/RSI)\n"
-        f"🔹 Análise de screenshots (IA Gemini)\n\n"
+        f"🔹 Análise de screenshots (IA Gemini)\n"
+        f"🔹 Eventos desportivos (Polymarket)\n\n"
         f"Usa os botões abaixo 👇"
     )
     if URL_IMAGEM_BOAS_VINDAS.startswith("http"):
@@ -409,17 +474,20 @@ def webhook():
                          "💱 *Escolhe o par que queres analisar:*",
                          teclado_pares())
 
+        elif data_btn == "polymarket":
+            send_message(chat_id, "🔍 A procurar eventos na Polymarket... ⏳")
+            resultado = obter_eventos_polymarket()
+            send_message(chat_id, resultado)
+
         elif data_btn == "ajuda":
             edit_message(chat_id, msg_id,
                          "🤖 *Como usar o bot:*\n\n"
                          "*📊 Análise automática:*\n"
                          "Escolhe par → timeframe → Analisar/Gráfico.\n\n"
                          "*🖼️ Análise por screenshot:*\n"
-                         "Envia uma *foto do teu gráfico* (do MT5, TradingView, etc.) e a IA vai analisá-la com tendência, entrada, SL e TP.\n\n"
-                         "*💡 Dicas para o screenshot:*\n"
-                         "• Mostra os preços nos eixos\n"
-                         "• Inclui o par e timeframe visíveis\n"
-                         "• Podes adicionar uma legenda com contexto\n\n"
+                         "Envia uma *foto do teu gráfico* (MT5, TradingView, etc.) para a IA analisar.\n\n"
+                         "*🏆 Polymarket:*\n"
+                         "Vê os próximos eventos desportivos e quanto tempo falta para começarem.\n\n"
                          "⚠️ _Ferramenta educacional. Não é aconselhamento financeiro._",
                          {"inline_keyboard": [[{"text": "⬅️ Voltar", "callback_data": "inicio"}]]})
 
@@ -446,7 +514,7 @@ def webhook():
     # --- Foto enviada pelo utilizador (screenshot para análise) ---
     elif "message" in update and "photo" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
-        foto = update["message"]["photo"][-1]  # maior resolução
+        foto = update["message"]["photo"][-1]
         contexto = update["message"].get("caption", "")
 
         img_bytes = descarregar_foto_telegram(foto["file_id"])
